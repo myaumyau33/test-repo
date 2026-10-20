@@ -1,0 +1,60 @@
+name: WIF without Google Actions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Exchange tokens and call Google Cloud API
+        shell: bash
+        env:
+          PROJECT_ID: iam-test-512213
+          PROVIDER: //iam.googleapis.com/projects/867496761966/locations/global/workloadIdentityPools/github-handson/providers/github-oidc
+        run: |
+          set -euo pipefail
+
+          # 1. GitHub OIDC JWTを取得
+          GITHUB_JWT=$(
+            curl --fail-with-body -sS -G \
+              -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              --data-urlencode "audience=$PROVIDER" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" \
+              | jq -er '.value'
+          )
+
+          echo "::add-mask::$GITHUB_JWT"
+          echo "GitHub OIDC JWT acquired"
+
+          # 2. Google Cloud STSでToken Exchange
+          STS_TOKEN=$(
+            curl --fail-with-body -sS \
+              -X POST https://sts.googleapis.com/v1/token \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n \
+                --arg audience "$PROVIDER" \
+                --arg token "$GITHUB_JWT" \
+                '{
+                  audience: $audience,
+                  grantType: "urn:ietf:params:oauth:grant-type:token-exchange",
+                  requestedTokenType: "urn:ietf:params:oauth:token-type:access_token",
+                  subjectTokenType: "urn:ietf:params:oauth:token-type:jwt",
+                  subjectToken: $token,
+                  scope: "https://www.googleapis.com/auth/cloud-platform"
+                }')" \
+              | jq -er '.access_token'
+          )
+
+          echo "::add-mask::$STS_TOKEN"
+          echo "Google Cloud STS exchange succeeded"
+
+          # 3. Google Cloud APIを直接呼び出す
+          curl --fail-with-body -sS \
+            -H "Authorization: Bearer $STS_TOKEN" \
+            "https://cloudresourcemanager.googleapis.com/v3/projects/$PROJECT_ID" \
+            | jq '{name, projectId, displayName, state}'
